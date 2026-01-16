@@ -23,6 +23,40 @@ app.get("/health", async (req, res) => {
   }
 });
 
+const Stripe = require("stripe");
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+app.use(express.json());
+
+app.post("/create-checkout-session", async (req, res) => {
+  const { discordId } = req.body;
+
+  if (!discordId) {
+    return res.status(400).json({ error: "Missing discordId" });
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      line_items: [
+        {
+          price: process.env.STRIPE_PRICE_ID,
+          quantity: 1,
+        },
+      ],
+      success_url: process.env.CHECKOUT_SUCCESS_URL,
+      cancel_url: process.env.CHECKOUT_CANCEL_URL,
+      metadata: {
+        discord_id: discordId,
+      },
+    });
+
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Stripe session failed" });
+  }
+});
 
 
 const port = process.env.PORT || 3000;
