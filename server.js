@@ -104,3 +104,13 @@ app.post("/create-checkout-session", async (req, res) => {
 /* -------------------- START -------------------- */
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`✅ Server running on port ${port}`));
+app.get("/env-check", (req, res) => {
+  res.json({
+    DATABASE_URL: !!process.env.DATABASE_URL,
+    STRIPE_SECRET_KEY: !!process.env.STRIPE_SECRET_KEY,
+    STRIPE_WEBHOOK_SECRET: !!process.env.STRIPE_WEBHOOK_SECRET,
+    STRIPE_PRICE_ID: !!process.env.STRIPE_PRICE_ID,
+    CHECKOUT_SUCCESS_URL: !!process.env.CHECKOUT_SUCCESS_URL,
+    CHECKOUT_CANCEL_URL: !!process.env.CHECKOUT_CANCEL_URL,
+  });
+});
