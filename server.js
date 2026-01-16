@@ -5,6 +5,11 @@ const { Pool } = require("pg");
 const app = express();
 app.use(express.json());
 
+app.post("/create-checkout-session", (req, res) => {
+  res.json({ ok: true, got: req.body });
+});
+
+
 if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL is missing (Railway Variables not set)");
 }
@@ -57,6 +62,18 @@ app.post("/create-checkout-session", async (req, res) => {
     res.status(500).json({ error: "Stripe session failed" });
   }
 });
+
+app.get("/routes", (req, res) => {
+  const routes = [];
+  app._router.stack.forEach((m) => {
+    if (m.route) {
+      const methods = Object.keys(m.route.methods).join(",").toUpperCase();
+      routes.push(`${methods} ${m.route.path}`);
+    }
+  });
+  res.json({ routes });
+});
+
 
 
 const port = process.env.PORT || 3000;
