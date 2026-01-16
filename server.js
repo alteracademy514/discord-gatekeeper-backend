@@ -23,22 +23,6 @@ app.get("/health", async (req, res) => {
   }
 });
 
-(async () => {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      discord_id TEXT PRIMARY KEY,
-      stripe_customer_id TEXT UNIQUE,
-      subscription_status TEXT NOT NULL DEFAULT 'unlinked',
-      link_deadline TIMESTAMPTZ,
-      billing_deadline TIMESTAMPTZ,
-      linked_at TIMESTAMPTZ,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    );
-  `);
-
-  console.log("✅ users table ready");
-})();
 
 
 const port = process.env.PORT || 3000;
