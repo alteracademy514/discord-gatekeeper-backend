@@ -114,3 +114,37 @@ app.get("/env-check", (req, res) => {
     CHECKOUT_CANCEL_URL: !!process.env.CHECKOUT_CANCEL_URL,
   });
 });
+
+const crypto = require("crypto");
+
+function makeToken() {
+  return crypto.randomBytes(24).toString("hex");
+}
+
+app.post("/link/start", async (req, res) => {
+  const { discordId } = req.body;
+  if (!discordId) {
+    return res.status(400).json({ error: "Missing discordId" });
+  }
+
+  // ensure user exists
+  await pool.query(
+    `insert into users (discord_id, subscription_status, link_deadline)
+     values ($1, 'unlinked', now() + interval '48 hours')
+     on conflict (discord_id) do nothing`,
+    [discordId]
+  );
+
+  const token = makeToken();
+
+  await pool.query(
+    `insert into link_tokens (token, discord_id, expires_at)
+     values ($1, $2, now() + interval '48 hours')`,
+    [token, discordId]
+  );
+
+  res.json({
+    url: `${process.env.PUBLIC_BACKEND_URL}/link?token=${token}`,
+  });
+});
+
