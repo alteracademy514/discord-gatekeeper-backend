@@ -15,7 +15,7 @@ function makeToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-/* -------------------- 1. WEBHOOKS (SIMPLIFIED) -------------------- */
+/* -------------------- 1. WEBHOOKS -------------------- */
 app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
@@ -40,21 +40,19 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
       }
     }
 
-    // B. Subscription Ended -> KICK WHEN TIME RUNS OUT
+    // B. Subscription Ended -> KICK IMMEDIATELY
+    // We use now() instead of the period end date to ensure immediate removal once Stripe fires this event.
     if (event.type === 'customer.subscription.deleted') {
       const sub = event.data.object;
       if (sub.customer) {
-        // Use the actual end date (if they cancelled at period end)
-        // If they cancelled "Immediately", this date is NOW.
-        const endDate = new Date(sub.current_period_end * 1000);
-        console.log(`🚫 Subscription ENDED for ${sub.customer}. Kick set for: ${endDate}`);
+        console.log(`🚫 Subscription DELETED for ${sub.customer}. Access revoked NOW.`);
         
         await pool.query(
           `UPDATE users 
            SET subscription_status = 'unlinked', 
-               link_deadline = to_timestamp($2) 
+               link_deadline = now() 
            WHERE stripe_customer_id = $1`,
-          [sub.customer, sub.current_period_end]
+          [sub.customer]
         );
       }
     }
@@ -72,7 +70,8 @@ app.use(express.urlencoded({ extended: true }));
 app.post("/link/start", async (req, res) => {
   const { discordId } = req.body;
   try {
-    // STRICT RULE: New users get exactly 24 hours
+    // Note: The bot index.js handles the 24h vs 1h logic upon joining.
+    // This route is a fallback for manually triggered links.
     await pool.query(
       `INSERT INTO users (discord_id, subscription_status, link_deadline)
        VALUES ($1, 'unlinked', now() + interval '24 hours')
