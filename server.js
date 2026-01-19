@@ -21,12 +21,13 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 /* -------------------- 1. BOT HANDOFF -------------------- */
+// The Bot calls this to get the first link
 app.post("/link/start", async (req, res) => {
   const { discordId } = req.body;
   if (!discordId) return res.status(400).json({ error: "Missing discordId" });
 
   try {
-    // Upsert User
+    // Upsert User (Create if new, update if exists)
     await pool.query(
       `INSERT INTO users (discord_id, subscription_status, link_deadline)
        VALUES ($1, 'unlinked', now() + interval '48 hours')
@@ -34,7 +35,7 @@ app.post("/link/start", async (req, res) => {
       [discordId]
     );
 
-    // Create Token
+    // Create Token A (Discord -> Web)
     const token = makeToken();
     await pool.query(
       `INSERT INTO link_tokens (token, discord_id, expires_at, metadata)
@@ -50,6 +51,7 @@ app.post("/link/start", async (req, res) => {
 });
 
 /* -------------------- 2. USER INTERFACE -------------------- */
+// User lands here and sees the email form
 app.get("/link", async (req, res) => {
   const { token } = req.query;
   try {
@@ -79,7 +81,8 @@ app.get("/link", async (req, res) => {
   }
 });
 
-/* -------------------- 3. VERIFY & MAGIC LINK -------------------- */
+/* -------------------- 3. VERIFY & SHOW LINK (DEBUG MODE) -------------------- */
+// Checks Stripe and shows the Magic Link on screen
 app.post("/link/scan", async (req, res) => {
   const { token, email } = req.body;
 
@@ -112,9 +115,12 @@ app.post("/link/scan", async (req, res) => {
 
     console.log(`🔗 MAGIC LINK for ${email}: ${magicLink}`);
 
+    // --- DEBUG MODE: SHOW LINK ON SCREEN ---
     res.send(`
-      <h2>✅ Verification Email Sent</h2>
-      <p>We found your subscription! Check your email (or server logs) for the link.</p>
+      <h2>✅ Verified!</h2>
+      <p>We found your subscription.</p>
+      <p><b>Click this link to finish linking your account:</b></p>
+      <p><a href="${magicLink}">${magicLink}</a></p>
     `);
 
   } catch (err) {
@@ -124,6 +130,7 @@ app.post("/link/scan", async (req, res) => {
 });
 
 /* -------------------- 4. FINISH -------------------- */
+// User clicks the Magic Link to complete the process
 app.get("/link/finish", async (req, res) => {
   const { token } = req.query;
 
