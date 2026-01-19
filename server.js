@@ -15,7 +15,7 @@ function makeToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-/* -------------------- 1. WEBHOOKS -------------------- */
+/* -------------------- 1. WEBHOOKS (SIMPLIFIED) -------------------- */
 app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
@@ -28,38 +28,30 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
   }
 
   try {
-    // A. Payment Failed
+    // A. Payment Failed (Bounced) -> KICK IMMEDIATELY
     if (event.type === 'invoice.payment_failed') {
       const invoice = event.data.object;
       if (invoice.customer) {
-        console.log(`⚠️ Payment failed for ${invoice.customer}. Giving 24h grace.`);
+        console.log(`⚠️ Payment bounced for ${invoice.customer}. Setting to Unlinked (Kick Now).`);
         await pool.query(
-          `UPDATE users SET subscription_status = 'payment_issue', link_deadline = now() + interval '24 hours' WHERE stripe_customer_id = $1`,
+          `UPDATE users SET subscription_status = 'unlinked', link_deadline = now() WHERE stripe_customer_id = $1`,
           [invoice.customer]
         );
       }
     }
 
-    // B. Subscription Updated (Detects "Cancel at Period End")
-    if (event.type === 'customer.subscription.updated') {
-      const sub = event.data.object;
-      if (sub.cancel_at_period_end) {
-        // Just log it so you know it worked. Do NOT kick them yet.
-        console.log(`ℹ️ User ${sub.customer} has scheduled a cancellation. They will be kicked on ${new Date(sub.current_period_end * 1000)}`);
-      }
-    }
-
-    // C. Subscription Really Deleted (The actual kick)
+    // B. Subscription Ended -> KICK WHEN TIME RUNS OUT
     if (event.type === 'customer.subscription.deleted') {
       const sub = event.data.object;
       if (sub.customer) {
-        // If testing, we kick immediately. If live, this fires at period end.
+        // Use the actual end date (if they cancelled at period end)
+        // If they cancelled "Immediately", this date is NOW.
         const endDate = new Date(sub.current_period_end * 1000);
-        console.log(`🚫 Subscription ENDED for ${sub.customer}. Deadline set to: ${endDate}`);
+        console.log(`🚫 Subscription ENDED for ${sub.customer}. Kick set for: ${endDate}`);
         
         await pool.query(
           `UPDATE users 
-           SET subscription_status = 'payment_issue', 
+           SET subscription_status = 'unlinked', 
                link_deadline = to_timestamp($2) 
            WHERE stripe_customer_id = $1`,
           [sub.customer, sub.current_period_end]
@@ -80,9 +72,10 @@ app.use(express.urlencoded({ extended: true }));
 app.post("/link/start", async (req, res) => {
   const { discordId } = req.body;
   try {
+    // STRICT RULE: New users get exactly 24 hours
     await pool.query(
       `INSERT INTO users (discord_id, subscription_status, link_deadline)
-       VALUES ($1, 'unlinked', now() + interval '48 hours')
+       VALUES ($1, 'unlinked', now() + interval '24 hours')
        ON CONFLICT (discord_id) DO NOTHING`,
       [discordId]
     );
@@ -101,7 +94,7 @@ app.get("/link", async (req, res) => {
   const { token } = req.query;
   const result = await pool.query(`SELECT 1 FROM link_tokens WHERE token = $1 AND expires_at > now() AND used_at IS NULL`, [token]);
   if (result.rows.length === 0) return res.status(403).send("Invalid link.");
-  res.send(`<html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;padding:20px;"><h2>Verify Subscription</h2><form action="/link/scan" method="POST"><input type="hidden" name="token" value="${token}" /><input type="email" name="email" required placeholder="billing@example.com" style="width:100%;padding:10px;margin-bottom:10px;" /><button type="submit" style="padding:10px 20px;background:#5865F2;color:white;border:none;">Verify</button></form></body></html>`);
+  res.send(`<html><body style="font-family:sans-serif;max-width:500px;margin:50px auto;padding:20px;"><h2>🔐 Verify Subscription</h2><form action="/link/scan" method="POST"><input type="hidden" name="token" value="${token}" /><input type="email" name="email" required placeholder="billing@example.com" style="width:100%;padding:10px;margin-bottom:10px;" /><button type="submit" style="padding:10px 20px;background:#5865F2;color:white;border:none;">Verify</button></form></body></html>`);
 });
 
 app.post("/link/scan", async (req, res) => {
