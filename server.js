@@ -16,7 +16,7 @@ function makeToken() {
 }
 
 /* -------------------- 1. WEBHOOKS (MUST BE FIRST) -------------------- */
-// This MUST come before app.use(express.json()) or Stripe signatures will fail.
+// This section listens for Stripe events. It handles the "Raw" data to verify security.
 app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
@@ -29,11 +29,12 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
   }
 
   try {
-    // A. Payment Failed (e.g. Card Declined) -> Give 24 hours
+    // A. Payment Failed (Card Declined, etc.)
     if (event.type === 'invoice.payment_failed') {
       const invoice = event.data.object;
       if (invoice.customer) {
-        console.log(`⚠️ Payment failed for ${invoice.customer}`);
+        console.log(`⚠️ Payment failed for ${invoice.customer}. Giving 24h grace.`);
+        // Set status to 'payment_issue' and give them 24 hours to fix it
         await pool.query(
           `UPDATE users SET subscription_status = 'payment_issue', link_deadline = now() + interval '24 hours' WHERE stripe_customer_id = $1`,
           [invoice.customer]
@@ -41,14 +42,22 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
       }
     }
 
-    // B. Cancelled / Deleted -> Give 2 hours (For your Testing)
+    // B. Subscription Ended / Cancelled
     if (event.type === 'customer.subscription.deleted') {
       const sub = event.data.object;
       if (sub.customer) {
-        console.log(`🚫 Sub cancelled for ${sub.customer}`);
+        // LOGIC UPDATE: We use the ACTUAL end date from Stripe
+        // sub.current_period_end is a Unix timestamp (seconds)
+        const endDate = new Date(sub.current_period_end * 1000); // Convert to JS Date
+        
+        console.log(`🚫 Subscription ended for ${sub.customer}. Deadline set to: ${endDate}`);
+        
         await pool.query(
-          `UPDATE users SET subscription_status = 'payment_issue', link_deadline = now() + interval '2 hours' WHERE stripe_customer_id = $1`,
-          [sub.customer]
+          `UPDATE users 
+           SET subscription_status = 'payment_issue', 
+               link_deadline = to_timestamp($2) 
+           WHERE stripe_customer_id = $1`,
+          [sub.customer, sub.current_period_end]
         );
       }
     }
@@ -59,7 +68,7 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
 });
 
 /* -------------------- 2. MIDDLEWARE (MUST BE SECOND) -------------------- */
-// Now we turn on JSON parsing for the rest of the app
+// This allows the rest of the app to read JSON data (for the link pages)
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -71,7 +80,7 @@ app.post("/link/start", async (req, res) => {
   if (!discordId) return res.status(400).json({ error: "Missing ID" });
 
   try {
-    // Insert with 48h deadline if new
+    // New users get 48 hours to link
     await pool.query(
       `INSERT INTO users (discord_id, subscription_status, link_deadline)
        VALUES ($1, 'unlinked', now() + interval '48 hours')
