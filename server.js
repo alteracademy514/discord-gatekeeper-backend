@@ -15,11 +15,8 @@ function makeToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-/* -------------------- 1. WEBHOOKS (Logic Update) -------------------- */
-// This logic now handles Cancellations by giving them 2 hours grace
+/* -------------------- 1. WEBHOOKS (MUST BE FIRST) -------------------- */
+// This MUST come before app.use(express.json()) or Stripe signatures will fail.
 app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   const sig = req.headers["stripe-signature"];
   let event;
@@ -32,11 +29,11 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
   }
 
   try {
-    // CASE A: Payment Failed (e.g. Card Declined)
+    // A. Payment Failed (e.g. Card Declined) -> Give 24 hours
     if (event.type === 'invoice.payment_failed') {
       const invoice = event.data.object;
       if (invoice.customer) {
-        console.log(`⚠️ Payment failed for ${invoice.customer}. Setting 24h grace.`);
+        console.log(`⚠️ Payment failed for ${invoice.customer}`);
         await pool.query(
           `UPDATE users SET subscription_status = 'payment_issue', link_deadline = now() + interval '24 hours' WHERE stripe_customer_id = $1`,
           [invoice.customer]
@@ -44,12 +41,11 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
       }
     }
 
-    // CASE B: Subscription Deleted / Cancelled (TESTING LOGIC)
-    // You requested: Go to payment problem, give 2 hours grace.
+    // B. Cancelled / Deleted -> Give 2 hours (For your Testing)
     if (event.type === 'customer.subscription.deleted') {
       const sub = event.data.object;
       if (sub.customer) {
-        console.log(`🚫 Sub cancelled for ${sub.customer}. Setting 2h grace for testing.`);
+        console.log(`🚫 Sub cancelled for ${sub.customer}`);
         await pool.query(
           `UPDATE users SET subscription_status = 'payment_issue', link_deadline = now() + interval '2 hours' WHERE stripe_customer_id = $1`,
           [sub.customer]
@@ -62,7 +58,14 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
   res.json({ received: true });
 });
 
-/* -------------------- 2. BOT HANDOFF -------------------- */
+/* -------------------- 2. MIDDLEWARE (MUST BE SECOND) -------------------- */
+// Now we turn on JSON parsing for the rest of the app
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+/* -------------------- 3. APP ROUTES -------------------- */
+
+// Start Link Process
 app.post("/link/start", async (req, res) => {
   const { discordId } = req.body;
   if (!discordId) return res.status(400).json({ error: "Missing ID" });
@@ -89,10 +92,9 @@ app.post("/link/start", async (req, res) => {
   }
 });
 
-/* -------------------- 3. USER INTERFACE -------------------- */
+// Show Verify Page
 app.get("/link", async (req, res) => {
   const { token } = req.query;
-  // Simple check to ensure token is valid
   const result = await pool.query(`SELECT 1 FROM link_tokens WHERE token = $1 AND expires_at > now() AND used_at IS NULL`, [token]);
   if (result.rows.length === 0) return res.status(403).send("Invalid link.");
 
@@ -108,7 +110,7 @@ app.get("/link", async (req, res) => {
   `);
 });
 
-/* -------------------- 4. VERIFY & SEND EMAIL (WP INTEGRATION) -------------------- */
+// Verify & Send Email (WordPress)
 app.post("/link/scan", async (req, res) => {
   const { token, email } = req.body;
 
@@ -118,7 +120,7 @@ app.post("/link/scan", async (req, res) => {
     
     const discordId = tokenRes.rows[0].discord_id;
 
-    // 1. Check Stripe
+    // Check Stripe
     const customers = await stripe.customers.list({ email, limit: 1 });
     if (customers.data.length === 0) return res.send("❌ No Stripe customer found.");
     const customer = customers.data[0];
@@ -126,7 +128,7 @@ app.post("/link/scan", async (req, res) => {
     const subs = await stripe.subscriptions.list({ customer: customer.id, status: 'active' });
     if (subs.data.length === 0) return res.send("⚠️ No active subscription found.");
 
-    // 2. Generate Magic Link
+    // Generate Magic Link
     await pool.query(`UPDATE link_tokens SET used_at = now() WHERE token = $1`, [token]);
     const magicToken = makeToken();
     await pool.query(
@@ -136,9 +138,8 @@ app.post("/link/scan", async (req, res) => {
 
     const magicLink = `${process.env.PUBLIC_BACKEND_URL}/link/finish?token=${magicToken}`;
 
-    // 3. SEND TO WORDPRESS
+    // Send via WordPress
     console.log(`📤 Sending email to ${email} via WordPress...`);
-    
     const wpResponse = await fetch(process.env.WORDPRESS_URL, {
         method: 'POST',
         headers: {
@@ -152,16 +153,15 @@ app.post("/link/scan", async (req, res) => {
         res.send(`<h2>✅ Email Sent</h2><p>Check your inbox for the verification link!</p>`);
     } else {
         console.error("WP Error:", await wpResponse.text());
-        res.send(`<h2>⚠️ Email Error</h2><p>We verified you, but couldn't send the email. Please contact support.</p>`);
+        res.send(`<h2>⚠️ Email Error</h2><p>Verified, but email failed to send.</p>`);
     }
-
   } catch (err) {
     console.error(err);
     res.status(500).send("Error verifying.");
   }
 });
 
-/* -------------------- 5. FINISH -------------------- */
+// Finish Linking
 app.get("/link/finish", async (req, res) => {
   const { token } = req.query;
   try {
@@ -171,7 +171,6 @@ app.get("/link/finish", async (req, res) => {
     const { discord_id, metadata } = result.rows[0];
     await pool.query(`UPDATE link_tokens SET used_at = now() WHERE token = $1`, [token]);
     
-    // Set Active
     await pool.query(
       `UPDATE users SET stripe_customer_id = $1, subscription_status = 'active', updated_at = now() WHERE discord_id = $2`,
       [metadata.customer_id, discord_id]
