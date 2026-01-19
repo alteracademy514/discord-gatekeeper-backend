@@ -1,0 +1,1 @@
+ALTER TABLE link_tokens ADD COLUMN IF NOT EXISTS metadata JSONB;

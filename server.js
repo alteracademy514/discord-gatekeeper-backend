@@ -6,212 +6,128 @@ const crypto = require("crypto");
 
 const app = express();
 
-/* -------------------- ENV GUARDS -------------------- */
-const required = [
-  "DATABASE_URL",
-  "STRIPE_SECRET_KEY",
-  "STRIPE_PRICE_ID",
-  "CHECKOUT_SUCCESS_URL",
-  "CHECKOUT_CANCEL_URL",
-  "STRIPE_WEBHOOK_SECRET",
-  "PUBLIC_BACKEND_URL" // Added this to ensure redirects work
-];
-
-for (const k of required) {
-  if (!process.env[k]) {
-    console.error(`❌ Missing env var: ${k}`);
-  }
-}
-
-/* -------------------- DATABASE -------------------- */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-/* -------------------- STRIPE -------------------- */
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-/* -------------------- HELPER FUNCTIONS -------------------- */
 function makeToken() {
-  return crypto.randomBytes(24).toString("hex");
+  return crypto.randomBytes(32).toString("hex");
 }
 
-/* -------------------- BASIC ROUTES -------------------- */
-app.get("/", (req, res) => res.send("Gatekeeper Backend Online 🟢"));
-
-app.get("/health", async (req, res) => {
-  try {
-    await pool.query("select 1");
-    res.json({ ok: true, db: true });
-  } catch (err) {
-    console.error("DB health failed:", err.message);
-    res.status(500).json({ ok: false, db: false, error: err.message });
-  }
-});
-
-/* -------------------- STRIPE WEBHOOK -------------------- */
-// This MUST be before express.json() because it needs raw body
-app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
-  const sig = req.headers["stripe-signature"];
-
-  let event;
-  try {
-    event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
-  } catch (err) {
-    console.error("❌ Webhook signature failed:", err.message);
-    return res.status(400).send("Webhook Error");
-  }
-
-  console.log("🔥 STRIPE EVENT:", event.type);
-
-  // HANDLE SUCCESSFUL CHECKOUT
-  if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    const discordId = session.metadata.discord_id; // Retrieved from the session we created in /link
-    const customerId = session.customer;
-
-    if (discordId) {
-      console.log(`✅ Linking Discord ${discordId} to Customer ${customerId}`);
-      
-      try {
-        await pool.query(
-          `UPDATE users 
-           SET stripe_customer_id = $1, 
-               subscription_status = 'active',
-               updated_at = now()
-           WHERE discord_id = $2`,
-          [customerId, discordId]
-        );
-        console.log("Database updated successfully.");
-      } catch (dbErr) {
-        console.error("❌ Database update failed:", dbErr);
-      }
-    }
-  }
-
-  // HANDLE SUBSCRIPTION DELETION (Optional but recommended)
-  if (event.type === 'customer.subscription.deleted') {
-     const subscription = event.data.object;
-     const customerId = subscription.customer;
-     try {
-       await pool.query(
-          `UPDATE users SET subscription_status = 'inactive' WHERE stripe_customer_id = $1`,
-          [customerId]
-       );
-       console.log(`❌ Subscription deleted for customer ${customerId}`);
-     } catch (err) {
-       console.error("Error updating inactive status:", err);
-     }
-  }
-
-  return res.json({ received: true });
-});
-
-/* -------------------- JSON MIDDLEWARE -------------------- */
-// Apply this AFTER the webhook
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-
-/* -------------------- CORE LOGIC ROUTES -------------------- */
-
-// 1. Bot calls this to get a unique link for the user
+// 1. Bot calls this to get a link
 app.post("/link/start", async (req, res) => {
   const { discordId } = req.body;
-  if (!discordId) {
-    return res.status(400).json({ error: "Missing discordId" });
-  }
+  if (!discordId) return res.status(400).json({ error: "Missing discordId" });
 
   try {
-    // Upsert user (create if not exists)
     await pool.query(
-      `INSERT INTO users (discord_id, subscription_status, link_deadline)
-       VALUES ($1, 'unlinked', now() + interval '48 hours')
-       ON CONFLICT (discord_id) DO UPDATE 
-       SET link_deadline = now() + interval '48 hours'`,
+      \INSERT INTO users (discord_id, subscription_status, link_deadline)
+       VALUES (\, 'unlinked', now() + interval '48 hours')
+       ON CONFLICT (discord_id) DO UPDATE SET updated_at = now()\,
       [discordId]
     );
 
     const token = makeToken();
-
-    // Store the token
     await pool.query(
-      `INSERT INTO link_tokens (token, discord_id, expires_at)
-       VALUES ($1, $2, now() + interval '48 hours')`,
-      [token, discordId]
+      \INSERT INTO link_tokens (token, discord_id, expires_at, metadata)
+       VALUES (\, \, now() + interval '30 minutes', \)\,
+      [token, discordId, { type: 'initial_handshake' }]
     );
 
-    // Return the full URL for the bot to display
-    res.json({
-      url: `${process.env.PUBLIC_BACKEND_URL}/link?token=${token}`,
-    });
+    res.json({ url: \\/link?token=\\ });
   } catch (err) {
-    console.error("Link start error:", err);
-    res.status(500).json({ error: "Internal Server Error" });
+    console.error("Start error:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-
-// 2. User clicks the link -> We validate token -> Redirect to Stripe
+// 2. User sees HTML form
 app.get("/link", async (req, res) => {
   const { token } = req.query;
+  const result = await pool.query(
+    \SELECT * FROM link_tokens WHERE token = \ AND expires_at > now() AND used_at IS NULL\,
+    [token]
+  );
 
-  if (!token) return res.status(400).send("Missing token parameter");
+  if (result.rows.length === 0) return res.status(403).send("Invalid or expired link.");
 
+  res.send(\
+    <html>
+      <body style="font-family: sans-serif; max-width: 500px; margin: 50px auto; padding: 20px;">
+        <h2>🔐 Verify Subscription</h2>
+        <p>Enter your billing email to verify your active subscription.</p>
+        <form action="/link/scan" method="POST">
+          <input type="hidden" name="token" value="\" />
+          <input type="email" name="email" required placeholder="billing@example.com" style="width: 100%; padding: 10px; margin-bottom: 10px;" />
+          <button type="submit" style="padding: 10px 20px; background: #5865F2; color: white; border: none; cursor: pointer;">Check Subscription</button>
+        </form>
+      </body>
+    </html>
+  \);
+});
+
+// 3. Verify Email & Send Magic Link
+app.post("/link/scan", async (req, res) => {
+  const { token, email } = req.body;
   try {
-    // Find valid token
-    const result = await pool.query(
-      `SELECT * FROM link_tokens 
-       WHERE token = $1 
-       AND expires_at > now() 
-       AND used_at IS NULL`,
-      [token]
+    const tokenRes = await pool.query(\SELECT * FROM link_tokens WHERE token = \\, [token]);
+    if (tokenRes.rows.length === 0) return res.status(403).send("Session expired.");
+    
+    const discordId = tokenRes.rows[0].discord_id;
+
+    // Search Stripe
+    const customers = await stripe.customers.list({ email: email, limit: 1 });
+    if (customers.data.length === 0) return res.send("❌ No customer found with that email.");
+    
+    const customer = customers.data[0];
+    const subs = await stripe.subscriptions.list({ customer: customer.id, status: 'active' });
+    if (subs.data.length === 0) return res.send("⚠️ Customer found, but no active subscription.");
+
+    // Generate Magic Link
+    await pool.query(\UPDATE link_tokens SET used_at = now() WHERE token = \\, [token]);
+    const magicToken = makeToken();
+    await pool.query(
+      \INSERT INTO link_tokens (token, discord_id, expires_at, metadata)
+       VALUES (\, \, now() + interval '1 hour', \)\,
+      [magicToken, discordId, { type: 'email_verification', customer_id: customer.id }]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(403).send("Invalid or expired link. Please generate a new one via the bot.");
-    }
+    const magicLink = \\/link/finish?token=\\;
+    
+    console.log(\🔗 MAGIC LINK for \: \\);
 
-    const discordId = result.rows[0].discord_id;
-
-    // Mark token as used
-    await pool.query(`UPDATE link_tokens SET used_at = now() WHERE token = $1`, [token]);
-
-    // Create Stripe Checkout Session
-    const session = await stripe.checkout.sessions.create({
-      mode: "subscription",
-      line_items: [{ price: process.env.STRIPE_PRICE_ID, quantity: 1 }],
-      success_url: process.env.CHECKOUT_SUCCESS_URL,
-      cancel_url: process.env.CHECKOUT_CANCEL_URL,
-      metadata: { 
-        discord_id: discordId // This passes the ID to the webhook later
-      }, 
-    });
-
-    // Redirect user to Stripe's hosted checkout page
-    res.redirect(session.url);
-
+    res.send(\
+      <h2>✅ Verified!</h2>
+      <p>We found your subscription. Please check your email (or server logs) for the magic link to finish.</p>
+    \);
   } catch (err) {
-    console.error("Link redirect error:", err);
-    res.status(500).send("Internal Server Error");
+    console.error(err);
+    res.status(500).send("Error verifying.");
   }
 });
 
+// 4. Finish Link
+app.get("/link/finish", async (req, res) => {
+  const { token } = req.query;
+  const result = await pool.query(\SELECT * FROM link_tokens WHERE token = \ AND used_at IS NULL\, [token]);
+  if (result.rows.length === 0) return res.status(403).send("Invalid link.");
 
-// Debug endpoint (keep or remove before production)
-app.get("/env-check", (req, res) => {
-  res.json({
-    DATABASE_URL: !!process.env.DATABASE_URL,
-    STRIPE_SECRET_KEY: !!process.env.STRIPE_SECRET_KEY,
-    STRIPE_WEBHOOK_SECRET: !!process.env.STRIPE_WEBHOOK_SECRET,
-    PUBLIC_BACKEND_URL: process.env.PUBLIC_BACKEND_URL,
-  });
+  const { discord_id, metadata } = result.rows[0];
+  await pool.query(\UPDATE link_tokens SET used_at = now() WHERE token = \\, [token]);
+  
+  await pool.query(
+    \UPDATE users SET stripe_customer_id = \, subscription_status = 'active', updated_at = now() WHERE discord_id = \\,
+    [metadata.customer_id, discord_id]
+  );
+
+  res.send("<h1>🎉 Success!</h1><p>Your account is linked.</p>");
 });
 
-/* -------------------- START -------------------- */
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`✅ Server running on port ${port}`));
+app.get("/health", (req, res) => res.json({ ok: true, db: true }));
+app.listen(process.env.PORT || 3000, () => console.log("Gatekeeper online"));
